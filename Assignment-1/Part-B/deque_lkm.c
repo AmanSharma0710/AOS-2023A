@@ -75,8 +75,6 @@ static struct rb_node *node = NULL;
 static struct rb_node **new = NULL;
 static struct rb_node *parent = NULL;
 static deque_node* data = NULL;
-static char buffer[4];
-static int32_t val = 0;
 
 
 /* Define the proc operations and initialize the proc entry */
@@ -98,6 +96,9 @@ static deque* CreateDeque(int8_t capacity) {
 		printk(KERN_ALERT DEVICE_NAME ": PID %d Wrong size of deque %d!!\n", current->pid, capacity);
 		d->left_uninit = 1;
 		d->arr = NULL;
+		d->capacity = 0;
+		d->front = -1;
+		d->rear = -1;
 		return d;
 	}
 	d->capacity = capacity;
@@ -283,23 +284,26 @@ static void destroy_rbtree(struct rb_root *root) {
 static ssize_t my_write(struct file *file, const char* buf, size_t count, loff_t* pos) {
 	if (!buf || !count)
 		return -EINVAL;
-	if (!mutex_trylock(&deque_mutex)) {
-		printk(KERN_ALERT DEVICE_NAME "PID %d Device is in Use <dev_write>.", current->pid);
-		return -EBUSY;
-	}
-	data = search(&root, current->pid);
+	/* The following variables need to be declared locally otherwise multiple processes will pollute the data */
+	deque_node *data_local = NULL;
+	char buffer[4];
+
+	mutex_lock(&deque_mutex);
+	data_local = search(&root, current->pid);
 	mutex_unlock(&deque_mutex);
-	if(data == NULL){
+
+	if(data_local == NULL){
 		printk(KERN_ALERT DEVICE_NAME ": PID %d Process not found in RBTree", current->pid);
 		return -EACCES;
 	}
-	if(data->value == NULL){
+
+	if(data_local->value == NULL){
 		// Implies that the process has not initialized the deque
 		if(count!=1){
 			// If the process has not initialized the deque, it can only send 1 byte
 			printk(KERN_ALERT DEVICE_NAME ": PID %d Wrong data sent. %ld bytes", current->pid, count);
 			// Initialize the deque with invalid values so that the process can't use it
-			data->value = CreateDeque(-1);
+			data_local->value = CreateDeque(-1);
 			return -EINVAL;
 		}
 		// Use the first byte to store the deque size
@@ -307,10 +311,9 @@ static ssize_t my_write(struct file *file, const char* buf, size_t count, loff_t
 			printk(KERN_ALERT DEVICE_NAME ": PID %d Error in copying data from user", current->pid);
 			return -EINVAL;
 		}
-		printk(KERN_INFO DEVICE_NAME ": PID %d deque size: %d", current->pid, data->value->capacity);
 		// Initialize the deque
-		data->value = CreateDeque(buffer[0]);
-		if(data->value->left_uninit){
+		data_local->value = CreateDeque(buffer[0]);
+		if(data_local->value->left_uninit){
 			// If the deque is not initialized, return error
 			return -EINVAL;
 		}
@@ -322,7 +325,7 @@ static ssize_t my_write(struct file *file, const char* buf, size_t count, loff_t
 		printk(KERN_ALERT DEVICE_NAME ": PID %d Wrong data sent. %ld bytes", current->pid, count);
 		return -EINVAL;
 	}
-	if(data->value->left_uninit){
+	if(data_local->value->left_uninit){
 		// If the deque is not initialized, return error
 		return -EINVAL;
 	}
@@ -331,9 +334,9 @@ static ssize_t my_write(struct file *file, const char* buf, size_t count, loff_t
 		printk(KERN_ALERT DEVICE_NAME ": PID %d Error in copying data from user", current->pid);
 		return -EINVAL;
 	}
-	printk(KERN_INFO DEVICE_NAME ": PID %d pushing %d to deque", current->pid, buffer[0]);
+	printk(KERN_INFO DEVICE_NAME ": PID %d pushing %d to deque", current->pid, *(int32_t*)buffer);
 	// Push the element to the deque
-	if(push(data->value, buffer[0]) != 0){
+	if(push(data_local->value, *(int32_t*)buffer) != 0){
 		// If the deque is full, return error
 		return -EINVAL;
 	}
@@ -343,23 +346,24 @@ static ssize_t my_write(struct file *file, const char* buf, size_t count, loff_t
 static ssize_t my_read(struct file *file, char* buf, size_t count, loff_t* pos) {
 	if(!buf || !count)
 		return -EINVAL;
-	
-	if(!mutex_trylock(&deque_mutex)){
-		printk(KERN_ALERT DEVICE_NAME "PID %d Device is in Use <dev_read>.", current->pid);
-		return -EBUSY;
-	}
-	data = search(&root, current->pid);
+	deque_node *data_local = NULL;
+	char buffer[4];
+	int32_t val = 0;
+
+	mutex_lock(&deque_mutex);
+	data_local = search(&root, current->pid);
 	mutex_unlock(&deque_mutex);
-	if(data == NULL){
+	
+	if(data_local == NULL){
 		printk(KERN_ALERT DEVICE_NAME ": PID %d Process not found in RBTree", current->pid);
 		return -EACCES;
 	}
-	if(data->value == NULL){
+	if(data_local->value == NULL){
 		// Implies that the process has not initialized the deque
 		printk(KERN_ALERT DEVICE_NAME ": PID %d Deque not initialized", current->pid);
 		return -EACCES;
 	}
-	if(data->value->left_uninit){
+	if(data_local->value->left_uninit){
 		// Implies that the process has not initialized the deque
 		printk(KERN_ALERT DEVICE_NAME ": PID %d Deque not initialized", current->pid);
 		return -EACCES;
@@ -371,7 +375,7 @@ static ssize_t my_read(struct file *file, char* buf, size_t count, loff_t* pos) 
 		return -EINVAL;
 	}
 	// Pop the element from the deque
-	if(pop(data->value, &val) != 0){
+	if(pop(data_local->value, &val) != 0){
 		// If the deque is empty, return error
 		return -EINVAL;
 	}
@@ -385,37 +389,34 @@ static ssize_t my_read(struct file *file, char* buf, size_t count, loff_t* pos) 
 }
 
 static int my_open(struct inode *inodep, struct file *filep) {
+	deque_node *data_local = NULL;
+	mutex_lock(&deque_mutex);
 	// If same process has already opened the file
 	if(search(&root, current->pid) != NULL){
 		printk(KERN_ALERT DEVICE_NAME ": PID %d, Tried to open twice\n", current->pid);
+		mutex_unlock(&deque_mutex);
 		return -EACCES;
 	}
+	mutex_unlock(&deque_mutex);
 
 	// Create a new entry for the process
-	data = kmalloc(sizeof(deque_node), GFP_KERNEL);
-	if(data == NULL){
+	data_local = kmalloc(sizeof(deque_node), GFP_KERNEL);
+	if(data_local == NULL){
 		printk(KERN_ALERT DEVICE_NAME ": PID %d Memory Error while allocating deque_node!", current->pid);
 		return -ENOMEM;
 	}
-	data->key = current->pid;
-	data->value = NULL;
-	if (!mutex_trylock(&deque_mutex)) {
-		printk(KERN_ALERT DEVICE_NAME "PID %d Device is in Use <dev_open>", current->pid);
-		kfree(data);
-		return -EBUSY;
-	}
-	printk(DEVICE_NAME ": PID %d !! Adding %d to RBTree !!\n", current->pid, data->key);
-	insert_node(&root, data);
+	data_local->key = current->pid;
+	data_local->value = NULL;
+	mutex_lock(&deque_mutex);
+	printk(DEVICE_NAME ": PID %d !! Adding %d to RBTree !!\n", current->pid, data_local->key);
+	insert_node(&root, data_local);
 	mutex_unlock(&deque_mutex);
 	printk(KERN_INFO DEVICE_NAME ": PID %d Device successfully opened\n", current->pid);
 	return 0;
 }
 
 static int my_close(struct inode *inodep, struct file *filep) {
-	if (!mutex_trylock(&deque_mutex)) {
-		printk(KERN_ALERT DEVICE_NAME "PID %d Device is in Use <dev_release>.", current->pid);
-		return -EBUSY;
-	}
+	mutex_lock(&deque_mutex);
 	// Delete the process entry from the RBTree
 	delete_node(&root, current->pid);
 	mutex_unlock(&deque_mutex);

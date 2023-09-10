@@ -1,8 +1,8 @@
-Team Members:
-	Ashish Rekhani (20CS10010)
-	Aman Sharma (20CS30063)
+## Team Members:
+>	Ashish Rekhani (20CS10010)  
+    Aman Sharma (20CS30063)
 
-Steps followed to configure and build the kernel on the VM provided:
+### Steps followed to configure and build the kernel on the VM provided:
 
 1. Download the source code:
 

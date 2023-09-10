@@ -37,25 +37,30 @@ typedef struct _deque deque;
 
 /* Deque methods */
 static deque* CreateDeque(int8_t capacity);
-static deque* DestroyDeque(deque* d);
+static void DestroyDeque(deque* d);
+static int32_t isFull(deque *d);
+static int32_t isEmpty(deque *d);
+static int32_t push_front(deque *d, int32_t key);
+static int32_t pop_front(deque *d, int32_t *key);
+static int32_t push_back(deque *d, int32_t key);
+static int32_t pop_back(deque *d, int32_t *key);
 static int32_t push(deque *d, int32_t key);
-static int32_t pop(deque *d);
+static int32_t pop(deque *d, int32_t *key);
 
 
-// We use a rb-tree to store the process pid and its corresponding heap
+// We use a rb-tree to store the process pid and its corresponding deque
 struct _deque_node{
-	int32_t key;
 	struct rb_node node;
+	int32_t key;
+	deque *value;
 };
 typedef struct _deque_node deque_node;
 
 /* RB-Tree Methods */
-static struct rb_root root = RB_ROOT;
-static struct rb_node *node = NULL;
 static deque_node* search(struct rb_root *root, int32_t key);
 static void insert_node(struct rb_root *root, deque_node *node);
 static void delete_node(struct rb_root *root, int32_t key);
-static void DestroyRBTree(struct rb_root *root);
+static void destroy_rbtree(struct rb_root *root);
 
 /* Defining methods for the proc file */
 static int     my_open(struct inode *, struct file *);
@@ -64,8 +69,17 @@ static ssize_t my_read(struct file *, char *, size_t, loff_t *);
 static ssize_t my_write(struct file *, const char *, size_t, loff_t *);
 
 
-//Declare other needed global variables
+/* Declare other needed global variables */
+static struct rb_root root = RB_ROOT;
+static struct rb_node *node = NULL;
+static struct rb_node **new = NULL;
+static struct rb_node *parent = NULL;
+static deque_node* data = NULL;
+static char buffer[4];
+static int32_t val = 0;
 
+
+/* Define the proc operations and initialize the proc entry */
 static struct proc_ops file_ops =
 {
 	.proc_open = my_open,		
@@ -74,345 +88,344 @@ static struct proc_ops file_ops =
 	.proc_write = my_write,
 };
 
-/* Add a new process with pid to the linked list */
-static void key_add(struct h_struct* entry) {
-	entry->next = htable->next;
-	htable->next = entry;
-}
-
-/* Return a process with a specific pic */
-static struct h_struct* get_entry_from_key(int key) {
-	struct h_struct* temp = htable->next;
-	while (temp != NULL) {
-		if (temp->key == key) {
-			return temp;
-		}
-		temp = temp->next;
-	}
-	return NULL;
-}
-
-/* Deletes a process entry */
-static void key_del(int key) {
-	struct h_struct *prev, *temp;
-	prev = temp = htable;
-	temp = temp->next;
-
-	while (temp != NULL) {
-		if (temp->key == key) {
-			prev->next = temp->next;
-			temp->global_heap = DestroyHeap(temp->global_heap);
-			temp->next = NULL;
-			printk("PID %d <key_del> Kfree key = %d", current->pid, temp->key);
-			kfree(temp);
-			break;
-		}
-		prev = temp;
-		temp = temp->next;
-	}
-
-}
-
-/* Prints all the process pid */
-static void print_key(void) {
-	struct h_struct *temp;
-	temp = htable->next;
-	while (temp != NULL) {
-		printk("<print_key> key = %d", temp->key);
-		temp = temp->next;
-	}
-}
-
-/* Destroy Linked List of porcesses */
-static void DestroyHashTable(void) {
-	struct h_struct *temp, *temp2;
-	temp = htable->next;
-	htable->next = NULL;
-	while (temp != NULL) {
-		temp2 = temp;
-		printk("<DestroyHashTable> Kfree key = %d", temp->key);
-		temp = temp->next;
-		kfree(temp2);
-	}
-	kfree(htable);
-}
-
-/* Create Heap */
-static Heap *CreateHeap(int32_t capacity, char heap_type) {
-	Heap *h = (Heap * ) kmalloc(sizeof(Heap), GFP_KERNEL);
-
-	//check if memory allocation is fails
-	if (h == NULL) {
-		printk(KERN_ALERT DEVICE_NAME ": PID %d Memory Error in allocating heap!", current->pid);
+static deque* CreateDeque(int8_t capacity) {
+	deque *d = (deque *) kmalloc(sizeof(deque), GFP_KERNEL);
+	if (d == NULL) {
+		printk(KERN_ALERT DEVICE_NAME ": PID %d Memory Error in allocating deque!", current->pid);
 		return NULL;
 	}
-	h->heap_type = ((heap_type == MIN_HEAP) ? 0 : 1);
-	h->count = 0;
-	h->capacity = capacity;
-	h->arr = (int32_t *) kmalloc_array(capacity, sizeof(int32_t), GFP_KERNEL); //size in bytes
-
-	//check if allocation succeed
-	if ( h->arr == NULL) {
-		printk(KERN_ALERT DEVICE_NAME ": PID %d Memory Error while allocating heap->arr!", current->pid);
+	if(capacity <= 0 || capacity > 100) {
+		printk(KERN_ALERT DEVICE_NAME ": PID %d Wrong size of deque %d!!\n", current->pid, capacity);
+		d->left_uninit = 1;
+		d->arr = NULL;
+		return d;
+	}
+	d->capacity = capacity;
+	d->front = -1;
+	d->rear = 0;
+	d->left_uninit = 0;
+	d->arr = (int32_t *) kmalloc_array(capacity, sizeof(int32_t), GFP_KERNEL); //size in bytes
+	if (d->arr == NULL) {
+		printk(KERN_ALERT DEVICE_NAME ": PID %d Memory Error while allocating deque->arr!", current->pid);
+		kfree(d);
 		return NULL;
 	}
-	return h;
+	return d;
 }
 
-/* Destroy Heap */
-static Heap* DestroyHeap(Heap* heap) {
-	if (heap == NULL)
-		return NULL; // heap is not allocated
-	printk(KERN_INFO DEVICE_NAME ": PID %d, %ld bytes of heap->arr Space freed.\n", current->pid, sizeof(heap->arr));
-	kfree_const(heap->arr);
-	kfree_const(heap);
-	return NULL;
+static void DestroyDeque(deque* d) {
+	if (d == NULL)
+		return; // deque is not allocated
+	printk(KERN_INFO DEVICE_NAME ": PID %d, %ld bytes of deque->arr Space freed.\n", current->pid, sizeof(d->arr));
+	if(d->arr != NULL)
+		kfree(d->arr);
+	kfree(d);
+	return;
 }
 
-/* Insert a number into heap */
-static int32_t insert(Heap *h, int32_t key) {
-	if ( h->count < h->capacity) {
-		h->arr[h->count] = key;
-		heapify_bottom_top(h, h->count);
-		h->count++;
-		h->last_inserted = key;
+static int32_t isFull(deque *d) {
+	return ((d->front == 0 && d->rear == d->capacity - 1) || d->front == d->rear + 1);
+}
+
+static int32_t isEmpty(deque *d) {
+	return (d->front == -1);
+}
+
+static int32_t push_front(deque *d, int32_t key) {
+	if (isFull(d)) {
+		printk(KERN_ALERT DEVICE_NAME ": PID %d Deque is full!!\n", current->pid);
+		return -EACCES;
 	}
-	else {
-		return -EACCES;  // Number of elements exceeded the capacity
+	if (d->front == -1) {
+		d->front = 0;
+		d->rear = 0;
+	}
+	else if (d->front == 0)
+		d->front = d->capacity - 1;
+	else
+		d->front = d->front - 1;
+	d->arr[d->front] = key;
+	return 0;
+}
+
+static int32_t pop_front(deque *d, int32_t *key) {
+	if (isEmpty(d)) {
+		printk(KERN_ALERT DEVICE_NAME ": PID %d Deque is empty!!\n", current->pid);
+		return -EACCES;
+	}
+	*key = d->arr[d->front];
+	if (d->front == d->rear) {
+		d->front = -1;
+		d->rear = -1;
+	}
+	else if (d->front == d->capacity - 1)
+		d->front = 0;
+	else
+		d->front = d->front + 1;
+	return 0;
+}
+
+static int32_t push_back(deque *d, int32_t key) {
+	if (isFull(d)) {
+		printk(KERN_ALERT DEVICE_NAME ": PID %d Deque is full!!\n", current->pid);
+		return -EACCES;
+	}
+	if (d->front == -1) {
+		d->front = 0;
+		d->rear = 0;
+	}
+	else if (d->rear == d->capacity - 1)
+		d->rear = 0;
+	else
+		d->rear = d->rear + 1;
+	d->arr[d->rear] = key;
+	return 0;
+}
+
+static int32_t pop_back(deque *d, int32_t *key) {
+	if (isEmpty(d)) {
+		printk(KERN_ALERT DEVICE_NAME ": PID %d Deque is empty!!\n", current->pid);
+		return -EACCES;
+	}
+	*key = d->arr[d->rear];
+	if (d->front == d->rear) {
+		d->front = -1;
+		d->rear = -1;
+	}
+	else if (d->rear == 0)
+		d->rear = d->capacity - 1;
+	else
+		d->rear = d->rear - 1;
+	return 0;
+}
+
+static int32_t push(deque *d, int32_t key) {
+	if (d->left_uninit) {
+		printk(KERN_ALERT DEVICE_NAME ": PID %d Deque is not initialized!!\n", current->pid);
+		return -EACCES;
+	}
+	if(key%2==0){
+		return push_back(d, key);
+	}
+	else{
+		return push_front(d, key);
 	}
 	return 0;
 }
 
-/* Heapify while inserting */
-static void heapify_bottom_top(Heap *h, int32_t index) {
-	int32_t temp;
-	int32_t parent_node = (index - 1) / 2;
-
-	if (h->heap_type == 0) {	// Min Heap
-		if (h->arr[parent_node] > h->arr[index]) {
-			//swap and recursive call
-			temp = h->arr[parent_node];
-			h->arr[parent_node] = h->arr[index];
-			h->arr[index] = temp;
-			heapify_bottom_top(h, parent_node);
-		}
-	}
-	else {	// Max Heap
-		if (h->arr[parent_node] < h->arr[index]) {
-			//swap and recursive call
-			temp = h->arr[parent_node];
-			h->arr[parent_node] = h->arr[index];
-			h->arr[index] = temp;
-			heapify_bottom_top(h, parent_node);
-		}
-	}
-}
-
-/* Heapify while deleting */
-static void heapify_top_bottom(Heap *h, int32_t parent_node) {
-	int32_t left = parent_node * 2 + 1;
-	int32_t right = parent_node * 2 + 2;
-	int32_t temp;
-
-	if (left >= h->count || left < 0)
-		left = -1;
-	if (right >= h->count || right < 0)
-		right = -1;
-
-	if (h->heap_type == 0) {	// Min heap
-		int32_t min;
-		if (left != -1 && h->arr[left] < h->arr[parent_node])
-			min = left;
-		else
-			min = parent_node;
-		if (right != -1 && h->arr[right] < h->arr[min])
-			min = right;
-
-		if (min != parent_node) {
-			temp = h->arr[min];
-			h->arr[min] = h->arr[parent_node];
-			h->arr[parent_node] = temp;
-
-			// recursive  call
-			heapify_top_bottom(h, min);
-		}
-	}
-	else {	// Max heap
-		int32_t max;
-		if (left != -1 && h->arr[left] > h->arr[parent_node])
-			max = left;
-		else
-			max = parent_node;
-		if (right != -1 && h->arr[right] > h->arr[max])
-			max = right;
-
-		if (max != parent_node) {
-			temp = h->arr[max];
-			h->arr[max] = h->arr[parent_node];
-			h->arr[parent_node] = temp;
-
-			// recursive  call
-			heapify_top_bottom(h, max);
-		}
-	}
-}
-
-/* Extract the top node of a heap */
-static int32_t PopMin(Heap *h) {
-	int32_t pop;
-	if (h->count == 0) {
-		return -INF;
-	}
-	// replace first node by last and delete last
-	pop = h->arr[0];
-	h->arr[0] = h->arr[h->count - 1];
-	h->count--;
-	heapify_top_bottom(h, 0);
-	return pop;
-}
-
-
-static ssize_t dev_write(struct file *file, const char* buf, size_t count, loff_t* pos) {
-	if (!buf || !count)
-		return -EINVAL;
-	if (copy_from_user(buffer, buf, count < 256 ? count : 256))
-		return -ENOBUFS;
-
-	// Get the process corresponing heap
-	entry = get_entry_from_key(current->pid);
-	if (entry == NULL) {
-		printk(KERN_ALERT DEVICE_NAME ": PID %d RAISED ERROR in dev_write entry is non-existent", current->pid);
+static int32_t pop(deque *d, int32_t *key) {
+	if (d->left_uninit) {
+		printk(KERN_ALERT DEVICE_NAME ": PID %d Deque is not initialized!!\n", current->pid);
 		return -EACCES;
 	}
-	// Args Set = 1 if the heap is initialized(not NULL)
-	args_set = (entry->global_heap) ? 1 : 0;
-	buffer_len = count < 256 ? count : 256;
+	return pop_front(d, key);
+}
 
-	// If heap is initialized
-	if (args_set) {
-		if (count != 4) {
-			printk(KERN_ALERT DEVICE_NAME ": PID %d WRONG DATA SENT. %d bytes", current->pid, buffer_len);
+
+static deque_node* search(struct rb_root *root, int32_t key) {
+	node = root->rb_node;
+	while(node){
+		data = rb_entry(node, deque_node, node);
+		if(key < data->key)
+			node = node->rb_left;
+		else if(key > data->key)
+			node = node->rb_right;
+		else
+			return data;
+	}
+	return NULL;
+}
+
+static void insert_node(struct rb_root *root, deque_node *node) {
+	new = &(root->rb_node);
+	parent = NULL;
+	while(*new){
+		data = rb_entry(*new, deque_node, node);
+		parent = *new;
+		if(node->key < data->key)
+			new = &((*new)->rb_left);
+		else if(node->key > data->key)
+			new = &((*new)->rb_right);
+		else
+			return;
+	}
+	rb_link_node(&node->node, parent, new);
+	rb_insert_color(&node->node, root);
+}
+
+static void delete_node(struct rb_root *root, int32_t key) {
+	node = root->rb_node;
+	while(node){
+		data = rb_entry(node, deque_node, node);
+		if(key < data->key)
+			node = node->rb_left;
+		else if(key > data->key)
+			node = node->rb_right;
+		else{
+			rb_erase(node, root);
+			kfree(data);
+			return;
+		}
+	}
+}
+
+static void destroy_rbtree(struct rb_root *root) {
+	node = NULL;
+	while((node = rb_first(root)) != NULL){
+		data = rb_entry(node, deque_node, node);
+		DestroyDeque(data->value);
+		rb_erase(node, root);
+		kfree(data);
+	}
+}
+
+
+static ssize_t my_write(struct file *file, const char* buf, size_t count, loff_t* pos) {
+	if (!buf || !count)
+		return -EINVAL;
+	if (!mutex_trylock(&deque_mutex)) {
+		printk(KERN_ALERT DEVICE_NAME "PID %d Device is in Use <dev_write>.", current->pid);
+		return -EBUSY;
+	}
+	data = search(&root, current->pid);
+	mutex_unlock(&deque_mutex);
+	if(data == NULL){
+		printk(KERN_ALERT DEVICE_NAME ": PID %d Process not found in RBTree", current->pid);
+		return -EACCES;
+	}
+	if(data->value == NULL){
+		// Implies that the process has not initialized the deque
+		if(count!=1){
+			// If the process has not initialized the deque, it can only send 1 byte
+			printk(KERN_ALERT DEVICE_NAME ": PID %d Wrong data sent. %ld bytes", current->pid, count);
+			// Initialize the deque with invalid values so that the process can't use it
+			data->value = CreateDeque(-1);
 			return -EINVAL;
 		}
-		// Check for unexpected type
-		char arr[4];
-		memset(arr, 0, 4 * sizeof(char));
-		memcpy(arr, buf, count * sizeof(char));
-		memcpy(&num, arr, sizeof(num));
-		printk(DEVICE_NAME ": PID %d writing %d to heap\n", current->pid, num);
-
-		ret = insert(entry->global_heap, num);
-		if (ret < 0) { // Heap is filled to capacity
-			return -EACCES;
+		// Use the first byte to store the deque size
+		if(copy_from_user(buffer, buf, 1)){
+			printk(KERN_ALERT DEVICE_NAME ": PID %d Error in copying data from user", current->pid);
+			return -EINVAL;
 		}
-		return sizeof(num);
+		printk(KERN_INFO DEVICE_NAME ": PID %d deque size: %d", current->pid, data->value->capacity);
+		// Initialize the deque
+		data->value = CreateDeque(buffer[0]);
+		if(data->value->left_uninit){
+			// If the deque is not initialized, return error
+			return -EINVAL;
+		}
+		return 1;
 	}
-
-	 // Any other call before the heap has been initialized
-	if (buffer_len != 2) {
-		return -EACCES;
-	}
-
-	// Initlize Heap
-	heap_type = buf[0];
-	heap_size = buf[1];
-	printk(DEVICE_NAME ": PID %d HEAP TYPE: %d", current->pid, heap_type);
-	printk(DEVICE_NAME ": PID %d HEAP SIZE: %d", current->pid, heap_size);
-	printk(DEVICE_NAME ": PID %d RECIEVED:  %ld bytes", current->pid, count);
-
-	if (heap_type != MIN_HEAP && heap_type != MAX_HEAP) {
-		printk(KERN_ALERT DEVICE_NAME ": PID %d Wrong Heap type sent!! %c\n", current->pid, heap_type);
+	// Implies that the process has already initialized the deque
+	if(count!=4){
+		// If the process has already initialized the deque, it can only send 4 bytes
+		printk(KERN_ALERT DEVICE_NAME ": PID %d Wrong data sent. %ld bytes", current->pid, count);
 		return -EINVAL;
 	}
-
-	if (heap_size <= 0 || heap_size > 100) {
-		printk(KERN_ALERT DEVICE_NAME ": PID %d Wrong size of heap %d!!\n", current->pid, heap_size);
+	if(data->value->left_uninit){
+		// If the deque is not initialized, return error
 		return -EINVAL;
 	}
-
-	entry->global_heap = DestroyHeap(entry->global_heap);	// destroy any existing heap before creating a new one
-	entry->global_heap = CreateHeap(heap_size, heap_type);	// allocating space for new heap
-
-	return buffer_len;
+	// Use the first 4 bytes to store the element to be pushed
+	if(copy_from_user(buffer, buf, 4)){
+		printk(KERN_ALERT DEVICE_NAME ": PID %d Error in copying data from user", current->pid);
+		return -EINVAL;
+	}
+	printk(KERN_INFO DEVICE_NAME ": PID %d pushing %d to deque", current->pid, buffer[0]);
+	// Push the element to the deque
+	if(push(data->value, buffer[0]) != 0){
+		// If the deque is full, return error
+		return -EINVAL;
+	}
+	return 4;
 }
 
-
-static ssize_t dev_read(struct file *file, char* buf, size_t count, loff_t* pos) {
-	if (!buf || !count)
+static ssize_t my_read(struct file *file, char* buf, size_t count, loff_t* pos) {
+	if(!buf || !count)
 		return -EINVAL;
-
-	// Get the process corresponing heap
-	entry = get_entry_from_key(current->pid);
-	if (entry == NULL) {
-		printk(KERN_ALERT DEVICE_NAME "PID %d RAISED ERROR in dev_read entry is non-existent", current->pid);
+	
+	if(!mutex_trylock(&deque_mutex)){
+		printk(KERN_ALERT DEVICE_NAME "PID %d Device is in Use <dev_read>.", current->pid);
+		return -EBUSY;
+	}
+	data = search(&root, current->pid);
+	mutex_unlock(&deque_mutex);
+	if(data == NULL){
+		printk(KERN_ALERT DEVICE_NAME ": PID %d Process not found in RBTree", current->pid);
 		return -EACCES;
 	}
-	// Args Set = 1 if the heap is initialized(not NULL)
-	args_set = (entry->global_heap) ? 1 : 0;
-
-	 // If heap is not initialized
-	if (args_set == 0) {
-		printk(KERN_ALERT DEVICE_NAME ": PID %d Heap not initialized", current->pid);
+	if(data->value == NULL){
+		// Implies that the process has not initialized the deque
+		printk(KERN_ALERT DEVICE_NAME ": PID %d Deque not initialized", current->pid);
 		return -EACCES;
 	}
-
-	// Extract the topmost node of heap
-	topnode = PopMin(entry->global_heap);
-	printk(DEVICE_NAME ": PID %d asking for %ld bytes\n", current->pid, count);
-	retval = copy_to_user(buf, (int32_t*)&topnode, count < sizeof(topnode) ? count : sizeof(topnode));
-
-	if (retval == 0 && topnode != -INF) {    // success!
-		printk(KERN_INFO DEVICE_NAME ": PID %d Sent %ld chars with value %d to the user\n", current->pid, sizeof(topnode), topnode);
-		return sizeof(topnode);
+	if(data->value->left_uninit){
+		// Implies that the process has not initialized the deque
+		printk(KERN_ALERT DEVICE_NAME ": PID %d Deque not initialized", current->pid);
+		return -EACCES;
 	}
-	else {
-		printk(KERN_INFO DEVICE_NAME ": PID %d Failed to send retval : %d, topnode is %d\n", current->pid, retval, topnode);
-		return -EACCES;      // Failed -- return a bad address message (i.e. -14)
+	// Implies that the process has already initialized the deque
+	if(count<4){
+		// If a process is reading from the deque, it can only read 4 bytes thus needs buffer of size 4 atleast
+		printk(KERN_ALERT DEVICE_NAME ": PID %d Wrong data sent. %ld bytes", current->pid, count);
+		return -EINVAL;
 	}
+	// Pop the element from the deque
+	if(pop(data->value, &val) != 0){
+		// If the deque is empty, return error
+		return -EINVAL;
+	}
+	// Use the first 4 bytes to store the element to be popped
+	if(copy_to_user(buf, &val, 4)){
+		printk(KERN_ALERT DEVICE_NAME ": PID %d Error in copying data to user", current->pid);
+		return -EINVAL;
+	}
+	printk(KERN_INFO DEVICE_NAME ": PID %d popping %d from deque", current->pid, val);
+	return 4;
 }
 
-
-static int dev_open(struct inode *inodep, struct file *filep) {
+static int my_open(struct inode *inodep, struct file *filep) {
 	// If same process has already opened the file
-	if (get_entry_from_key(current->pid) != NULL) {
+	if(search(&root, current->pid) != NULL){
 		printk(KERN_ALERT DEVICE_NAME ": PID %d, Tried to open twice\n", current->pid);
 		return -EACCES;
 	}
 
-	// Create a new entry to the process linked list
-	entry = kmalloc(sizeof(struct h_struct), GFP_KERNEL);
-	*entry = (struct h_struct) {current->pid, NULL, NULL};
+	// Create a new entry for the process
+	data = kmalloc(sizeof(deque_node), GFP_KERNEL);
+	if(data == NULL){
+		printk(KERN_ALERT DEVICE_NAME ": PID %d Memory Error while allocating deque_node!", current->pid);
+		return -ENOMEM;
+	}
+	data->key = current->pid;
+	data->value = NULL;
 	if (!mutex_trylock(&deque_mutex)) {
 		printk(KERN_ALERT DEVICE_NAME "PID %d Device is in Use <dev_open>", current->pid);
+		kfree(data);
 		return -EBUSY;
 	}
-	printk(DEVICE_NAME ": PID %d !!!! Adding %d to HashTable\n", current->pid, entry->key);
-	key_add(entry);
-
-	numberOpens++;
-	printk(KERN_INFO DEVICE_NAME ": PID %d Device has been opened %d time(s)\n", current->pid, numberOpens);
-	print_key();
+	printk(DEVICE_NAME ": PID %d !! Adding %d to RBTree !!\n", current->pid, data->key);
+	insert_node(&root, data);
 	mutex_unlock(&deque_mutex);
+	printk(KERN_INFO DEVICE_NAME ": PID %d Device successfully opened\n", current->pid);
 	return 0;
 }
 
-
-static int dev_release(struct inode *inodep, struct file *filep) {
+static int my_close(struct inode *inodep, struct file *filep) {
 	if (!mutex_trylock(&deque_mutex)) {
 		printk(KERN_ALERT DEVICE_NAME "PID %d Device is in Use <dev_release>.", current->pid);
 		return -EBUSY;
 	}
-	// Delete the process entry from the process linked list
-	key_del(current->pid);
-	printk(KERN_INFO DEVICE_NAME ": PID %d Device successfully closed\n", current->pid);
-	print_key();
+	// Delete the process entry from the RBTree
+	delete_node(&root, current->pid);
 	mutex_unlock(&deque_mutex);
+	printk(KERN_INFO DEVICE_NAME ": PID %d Device successfully closed\n", current->pid);
 	return 0;
 }
 
 
 static int hello_init(void) {
-	struct proc_dir_entry *entry = proc_create(DEVICE_NAME, 0, NULL, &file_ops);
+	struct proc_dir_entry *entry = proc_create(DEVICE_NAME, 0777, NULL, &file_ops);
 	if (!entry)
 		return -ENOENT;
 	printk(KERN_ALERT DEVICE_NAME ": Initialising the LKM!\n");
@@ -420,10 +433,9 @@ static int hello_init(void) {
 	return 0;
 }
 
-
 static void hello_exit(void) {
 	mutex_destroy(&deque_mutex);
-	DestroyRBTree(&root);
+	destroy_rbtree(&root);
 	remove_proc_entry(DEVICE_NAME, NULL);
 
 	printk(KERN_ALERT DEVICE_NAME ": Goodbye\n");

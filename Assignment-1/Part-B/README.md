@@ -21,7 +21,7 @@ It can be removed by running the command `sudo rmmod deque_lkm`.
 The module also logs a bunch of kernel messages, which can be seen by running the command `dmesg` or `sudo tail -f /var/log/syslog`.
 
 
-The kernel module uses procfs to implement the deque data structure. Upon installation, it creates a file named /proc/partb_1_20CS30063_20CS10010, which can be used to interact with the module. The file supports reading and writing to it, and provides a different deque to every process that accesses it, but is not thread-safe. 
+The kernel module uses procfs to implement the deque data structure. Upon installation, it creates a file named /proc/partb_1_20CS30063_20CS10010, which can be used to interact with the module. The file supports reading and writing to it, and provides a different deque to every process that accesses it. This is implemented by maintaining pairs of pid-deque. To store these pairs and access them in an efficient manner, we port the Red Black Tree implementation of the Linux Kernel and use it for our purpose, providing logarithmic time access to all the elements as well as logarithmic adding and removing of elements. The module is not thread safe however, and if multiple threads are using it they need to be synchronized by the user.
 
 ### A user-space process can interact with the LKM in the following manner:
 1. It will open the file (/proc/partb_1_partb_1_20CS30063_20CS10010) in read-write mode.

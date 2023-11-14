@@ -34,12 +34,11 @@ RUN ./xdp-tools/configure
 RUN make -C ./xdp-tools
 RUN make -C ./xdp-tools install
 
-COPY ./src/loadbalancer.c /src/loadbalancer.c
+COPY ./src/loadbalancer.bpf.c /src/loadbalancer.bpf.c
 
-RUN clang -O2 -Wall -target bpf -c /src/xdp_prog.c -o /src/xdp_prog.o
+#TODO: change the name of the file
+RUN clang -g -O2 -emit-llvm -c /src/loadbalancer.bpf.c -o - | llc -march=bpf -filetype=obj -o /src/loadbalancer.o
 
 EXPOSE 8080
-
-RUN chmod +x /src/server
 
 ENTRYPOINT [ "/bin/bash" ]

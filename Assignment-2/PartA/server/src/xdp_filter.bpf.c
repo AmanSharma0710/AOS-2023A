@@ -34,7 +34,7 @@ int xdp_prog(struct xdp_md *ctx) {
     if (ip->protocol != IPPROTO_UDP) {
         return XDP_PASS;
     }
-
+    //TODO: Substitute size of ip header with ip->ihl * 4
     struct udphdr* udp = (void*)ip + sizeof(*ip);
 
     if ((void*)udp + sizeof(*udp) > data_end) {
